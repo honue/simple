@@ -91,7 +91,8 @@ jobs:
   windows:
     name: Windows ${{ matrix.arch }}
     needs: source-check
-    runs-on: windows-2025
+    # Visual Studio 17 with both x64 and ARM64 C++ toolchains is guaranteed here.
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
