@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.19)
 
 set(CMAKE_CXX_STANDARD 14)
-set(CXX_STANDARD_REQUIRED)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 if (APPLE)
    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "")
    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.11" CACHE STRING "Minimum OS X deployment version")
@@ -21,7 +21,10 @@ if (MSVC)
    # https://stackoverflow.com/a/65128497/1203241
    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
    set(BUILD_SHARED_LIBS TRUE)
-   add_compile_options("$<$<C_COMPILER_ID:MSVC>:/utf-8>")
+   add_compile_options(
+     "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+     "$<$<CXX_COMPILER_ID:MSVC>:/EHsc>"
+   )
 endif()
 
 set(SQLITE3_HEADERS_DIR ${PROJECT_SOURCE_DIR}/contrib/sqlite3)
@@ -81,4 +84,3 @@ if (NOT IOS AND BUILD_TEST_EXAMPLE)
   enable_testing()
   add_subdirectory(test)
 endif()
-
