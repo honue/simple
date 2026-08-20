@@ -4,6 +4,8 @@ a.out
 compile_commands.json
 libsimple.*
 build/
+build-mediainfokeeper-*/
+artifacts/
 build-ios/
 build-ios-*/
 build-ohos/

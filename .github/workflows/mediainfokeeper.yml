@@ -1,0 +1,266 @@
+name: MediaInfoKeeper tokenizer builds
+
+on:
+  push:
+    branches:
+      - mediainfokeeper
+    paths:
+      - ".github/workflows/mediainfokeeper.yml"
+      - "scripts/build-mediainfokeeper-linux.sh"
+      - "CMakeLists.txt"
+      - "src/**"
+      - "contrib/CMakeRC.cmake"
+      - "contrib/pinyin.txt"
+      - "contrib/sqlite3/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CMAKE_PYPI_VERSION: "3.31.6"
+  EXPECTED_PINYIN_SHA256: "9f76f7c901fa94f896e643d5d70f66f9d82723b33b3d512e37ab15ced15336d3"
+
+jobs:
+  source-check:
+    name: Verify embedded pinyin resource
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify pinyin resource
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(sha256sum contrib/pinyin.txt | awk '{print $1}')"
+          test "${actual}" = "${EXPECTED_PINYIN_SHA256}"
+          test "$(wc -l < contrib/pinyin.txt)" -eq 44437
+
+  linux:
+    name: Linux ${{ matrix.arch }} (${{ matrix.glibc_label }})
+    needs: source-check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+            # manylinux2010 is the oldest maintained build environment we use here.
+            # Its glibc 2.12 baseline is lower than MediaInfoKeeper's previous x64 binary.
+            image: quay.io/pypa/manylinux2010_x86_64
+            glibc_label: glibc <= 2.12
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            # manylinux2014 defines the first standardized AArch64 baseline: glibc 2.17.
+            # This matches MediaInfoKeeper's currently proven Synology-compatible binary.
+            image: quay.io/pypa/manylinux2014_aarch64
+            glibc_label: glibc <= 2.17
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build and verify legacy-compatible extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -e CMAKE_PYPI_VERSION \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            "${{ matrix.image }}" \
+            bash -lc '
+              set -euo pipefail
+              python_bin="$(ls -1 /opt/python/cp3*-cp3*/bin/python | tail -n 1)"
+              "${python_bin}" -m pip install --disable-pip-version-check "cmake==${CMAKE_PYPI_VERSION}"
+              export PATH="$(dirname "${python_bin}"):${PATH}"
+              bash scripts/build-mediainfokeeper-linux.sh "${{ matrix.arch }}"
+            '
+
+      - name: Upload Linux tokenizer
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenizer-linux-${{ matrix.arch }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: source-check
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cmake_arch: x64
+            expected_machine: "8664 machine (x64)"
+          - arch: arm64
+            cmake_arch: ARM64
+            expected_machine: "AA64 machine (ARM64)"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B "build-mediainfokeeper-windows-${{ matrix.arch }}" `
+            -G "Visual Studio 17 2022" `
+            -A "${{ matrix.cmake_arch }}" `
+            -DBUILD_SQLITE3=OFF `
+            -DSIMPLE_WITH_JIEBA=OFF `
+            -DBUILD_TEST_EXAMPLE=OFF `
+            -DBUILD_STATIC=OFF `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build and verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $buildDir = "build-mediainfokeeper-windows-${{ matrix.arch }}"
+          cmake --build $buildDir --config Release --target simple --parallel
+
+          $source = Join-Path $buildDir "src/Release/simple.dll"
+          $artifactDir = "artifacts/Resources/Tokenizer/win/${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          Copy-Item $source (Join-Path $artifactDir "simple.dll")
+
+          $headers = (& dumpbin /headers $source | Out-String)
+          if (-not $headers.Contains("${{ matrix.expected_machine }}")) {
+            throw "Unexpected PE architecture.`n$headers"
+          }
+
+          $exports = (& dumpbin /exports $source | Out-String)
+          if (-not $exports.Contains("sqlite3_simple_init")) {
+            throw "sqlite3_simple_init is not exported."
+          }
+
+          $dependents = (& dumpbin /dependents $source | Out-String)
+          foreach ($forbidden in @("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll", "sqlite3.dll")) {
+            if ($dependents.Contains($forbidden)) {
+              throw "Forbidden runtime dependency: $forbidden"
+            }
+          }
+
+          $binaryHash = (Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          $pinyinHash = (Get-FileHash "contrib/pinyin.txt" -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            "architecture=${{ matrix.arch }}"
+            "binary_sha256=$binaryHash"
+            "pinyin_sha256=$pinyinHash"
+            "dependencies:"
+            $dependents
+          ) | Set-Content (Join-Path $artifactDir "build-info.txt")
+
+      - name: Upload Windows tokenizer
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenizer-windows-${{ matrix.arch }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: source-check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+            cmake_arch: x86_64
+            deployment_target: "10.11"
+          - arch: arm64
+            runner: macos-15
+            cmake_arch: arm64
+            deployment_target: "11.0"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="build-mediainfokeeper-macos-${{ matrix.arch }}"
+          artifact_dir="artifacts/Resources/Tokenizer/mac/${{ matrix.arch }}"
+
+          cmake -S . -B "${build_dir}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="${{ matrix.cmake_arch }}" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ matrix.deployment_target }}" \
+            -DBUILD_SQLITE3=OFF \
+            -DSIMPLE_WITH_JIEBA=OFF \
+            -DBUILD_TEST_EXAMPLE=OFF \
+            -DBUILD_STATIC=OFF
+
+          cmake --build "${build_dir}" --config Release --target simple --parallel
+          strip -x "${build_dir}/src/libsimple.dylib"
+          mkdir -p "${artifact_dir}"
+          cp "${build_dir}/src/libsimple.dylib" "${artifact_dir}/libsimple.dylib"
+
+          test "$(lipo -archs "${artifact_dir}/libsimple.dylib")" = "${{ matrix.cmake_arch }}"
+          nm -gU "${artifact_dir}/libsimple.dylib" | grep '_sqlite3_simple_init$' >/dev/null
+
+          if otool -L "${artifact_dir}/libsimple.dylib" | grep 'libsqlite3' >/dev/null; then
+            echo "Unexpected libsqlite3 dependency" >&2
+            exit 1
+          fi
+
+          {
+            echo "architecture=${{ matrix.arch }}"
+            echo "deployment_target=${{ matrix.deployment_target }}"
+            echo "pinyin_sha256=$(shasum -a 256 contrib/pinyin.txt | awk '{print $1}')"
+            echo "binary_sha256=$(shasum -a 256 "${artifact_dir}/libsimple.dylib" | awk '{print $1}')"
+            echo "dependencies:"
+            otool -L "${artifact_dir}/libsimple.dylib" | sed 's/^/  /'
+          } > "${artifact_dir}/build-info.txt"
+
+      - name: Upload macOS tokenizer
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenizer-macos-${{ matrix.arch }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  bundle:
+    name: Bundle six MediaInfoKeeper tokenizer files
+    needs:
+      - linux
+      - windows
+      - macos
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tokenizer-*
+          path: bundle
+          merge-multiple: true
+
+      - name: Generate manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd bundle
+          find Resources/Tokenizer -type f ! -name build-info.txt -print0 |
+            sort -z |
+            xargs -0 sha256sum > SHA256SUMS
+          find Resources/Tokenizer -type f -print | sort
+          cat SHA256SUMS
+
+      - name: Upload complete tokenizer bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediainfokeeper-tokenizers
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 30
