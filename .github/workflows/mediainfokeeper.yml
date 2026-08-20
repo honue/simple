@@ -131,17 +131,27 @@ jobs:
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           Copy-Item $source (Join-Path $artifactDir "simple.dll")
 
-          $headers = (& dumpbin /headers $source | Out-String)
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = (& $vswhere -latest -products * -property installationPath).Trim()
+          $dumpbin = Get-ChildItem `
+            (Join-Path $vsPath "VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe") |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $dumpbin) {
+            throw "Unable to locate dumpbin.exe under $vsPath"
+          }
+
+          $headers = (& $dumpbin /headers $source | Out-String)
           if (-not $headers.Contains("${{ matrix.expected_machine }}")) {
             throw "Unexpected PE architecture.`n$headers"
           }
 
-          $exports = (& dumpbin /exports $source | Out-String)
+          $exports = (& $dumpbin /exports $source | Out-String)
           if (-not $exports.Contains("sqlite3_simple_init")) {
             throw "sqlite3_simple_init is not exported."
           }
 
-          $dependents = (& dumpbin /dependents $source | Out-String)
+          $dependents = (& $dumpbin /dependents $source | Out-String)
           foreach ($forbidden in @("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll", "sqlite3.dll")) {
             if ($dependents.Contains($forbidden)) {
               throw "Forbidden runtime dependency: $forbidden"
