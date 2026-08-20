@@ -6,6 +6,7 @@ on:
       - mediainfokeeper
     paths:
       - ".github/workflows/mediainfokeeper.yml"
+      - ".gitattributes"
       - "scripts/build-mediainfokeeper-linux.sh"
       - "CMakeLists.txt"
       - "src/**"
@@ -160,6 +161,9 @@ jobs:
 
           $binaryHash = (Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant()
           $pinyinHash = (Get-FileHash "contrib/pinyin.txt" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($pinyinHash -ne $env:EXPECTED_PINYIN_SHA256) {
+            throw "Unexpected pinyin resource hash: $pinyinHash"
+          }
           @(
             "architecture=${{ matrix.arch }}"
             "binary_sha256=$binaryHash"

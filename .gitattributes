@@ -1,3 +1,1 @@
-*.h linguist-language=C++
-
-contrib/** linguist-vendored
+contrib/pinyin.txt text eol=lf
